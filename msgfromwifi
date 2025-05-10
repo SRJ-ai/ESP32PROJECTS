@@ -1,108 +1,112 @@
 #include <WiFi.h>
-#include <Wire.h>
+
+#include <DHT.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <WebServer.h>
 
+// DHT setup
+#define DHTPIN 12
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// OLED setup
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
-#define SCREEN_ADDRESS 0x3C
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// WiFi credentials
 const char* ssid = "sardar";
 const char* password = "12345678";
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-WebServer server(80);
-
-void displayMultiline(String msg) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-
-  int lineHeight = 8;
-  int maxLines = SCREEN_HEIGHT / lineHeight;
-  int currentLine = 0;
-
-  int start = 0;
-  while (start < msg.length() && currentLine < maxLines) {
-    int end = start + 21;
-    if (end > msg.length()) end = msg.length();
-    String line = msg.substring(start, end);
-    display.setCursor(0, currentLine * lineHeight);
-    display.println(line);
-    start = end;
-    currentLine++;
-  }
-
-  display.display();
-}
-
-void handleRoot() {
-  String html = R"rawliteral(
-    <!DOCTYPE html>
-    <html>
-    <body>
-      <h2>ESP32 OLED Display</h2>
-      <form action="/send">
-        <textarea name="msg" rows="4" cols="30" placeholder="Enter multiple lines..."></textarea><br>
-        <input type="submit" value="Display">
-      </form>
-    </body>
-    </html>
-  )rawliteral";
-  server.send(200, "text/html", html);
-}
-
-void handleSend() {
-  if (server.hasArg("msg")) {
-    String msg = server.arg("msg");
-    Serial.println("Message: " + msg);
-
-    displayMultiline(msg);
-
-    server.send(200, "text/html", "<p>Message shown!</p><a href='/'>Back</a>");
-  } else {
-    server.send(400, "text/plain", "No message received");
-  }
-}
+WiFiServer server(80);
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(21, 22);
+  dht.begin();
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println("OLED init failed");
+  // OLED init
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED not found");
     while (true);
   }
-
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Connecting...");
   display.display();
 
+  // Connect to WiFi
   WiFi.begin(ssid, password);
+  display.setCursor(0, 0);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.println("Connecting WiFi...");
+  display.display();
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
-
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println("IP Address:");
+  display.println("WiFi connected!");
+  display.print("IP: ");
   display.println(WiFi.localIP());
   display.display();
+  delay(2000);
 
-  server.on("/", handleRoot);
-  server.on("/send", handleSend);
   server.begin();
 }
 
 void loop() {
-  server.handleClient();
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  // Show on OLED
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  if (isnan(temperature) || isnan(humidity)) {
+    display.println("Sensor Error");
+  } else {
+    display.print("Temp: ");
+    display.print(temperature);
+    display.println(" C");
+    display.print("Hum: ");
+    display.print(humidity);
+    display.println(" %");
+  }
+  display.display();
+
+  // Handle web server
+  WiFiClient client = server.available();
+  if (client) {
+    Serial.println("New Client.");
+    String req = client.readStringUntil('\r');
+    client.flush();
+
+    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<title>ESP32 Weather</title></head><body>";
+    html += "<h1>ESP32 Weather Station</h1>";
+
+    if (isnan(temperature) || isnan(humidity)) {
+      html += "<p>Sensor Error</p>";
+    } else {
+      html += "<p>Temperature: " + String(temperature) + " C</p>";
+      html += "<p>Humidity: " + String(humidity) + " %</p>";
+    }
+
+    html += "</body></html>";
+
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html");
+    client.println("Connection: close");
+    client.println();
+    client.println(html);
+
+    delay(10);
+    client.stop();
+    Serial.println("Client disconnected.");
+  }
+
+  delay(2000);
 }
